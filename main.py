@@ -49,13 +49,13 @@ class OrderModal(discord.ui.Modal, title="🛒 填寫表單"):
         formatted_codes = "\n".join([f"🔹 {c}" for c in codes])
 
         embed = discord.Embed(
-            title="📦 新訂單提交",
+            title="新訂單提交",
             color=discord.Color.blue()
         )
-        embed.add_field(name="💰 所需商品", value=self.product.value, inline=False)
-        embed.add_field(name="🧾 帳號", value=self.account.value, inline=False)
-        embed.add_field(name="🔑 密碼", value=self.password.value, inline=False)
-        embed.add_field(name="🧩 備用碼", value=formatted_codes or "無", inline=False)
+        embed.add_field(name=" 所需商品", value=self.product.value, inline=False)
+        embed.add_field(name=" 帳號", value=self.account.value, inline=False)
+        embed.add_field(name=" 密碼", value=self.password.value, inline=False)
+        embed.add_field(name=" 備用碼", value=formatted_codes or "無", inline=False)
 
         await self.target_channel.send(embed=embed)
         await interaction.response.send_message("✅ 表單已提交！", ephemeral=True)
