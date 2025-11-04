@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .env
+*.bak
+keywords.json
+review_channel.json
