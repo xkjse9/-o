@@ -1,20 +1,51 @@
 import os
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands, ui, Interaction
 import json
 import threading
 import requests
 import time
-from flask import Flask
 import traceback
+import logging
+import datetime
+from datetime import timezone, timedelta
+from flask import Flask
 
-# ---------- Discord Bot 設定 ----------
+# ====== 基本設定 ======
+logging.basicConfig(level=logging.INFO)
+
+TOKEN = os.environ.get("DISCORD_TOKEN")
+if not TOKEN:
+    raise ValueError("[ERROR] 找不到 DISCORD_TOKEN，請在 Render 環境變數中設定。")
+
+# ====== Discord Bot ======
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- JSON 儲存檔 (關鍵字系統) ----------
+# ====== 評價頻道 JSON ======
+REVIEW_CHANNEL_FILE = "review_channel.json"
+review_channels = {}
+if os.path.exists(REVIEW_CHANNEL_FILE):
+    try:
+        with open(REVIEW_CHANNEL_FILE, "r", encoding="utf-8") as f:
+            review_channels = json.load(f)
+    except Exception:
+        print("[ERROR] 載入評價頻道失敗。")
+        traceback.print_exc()
+
+def save_review_channel(guild_id, channel_id):
+    review_channels[str(guild_id)] = channel_id
+    try:
+        with open(REVIEW_CHANNEL_FILE, "w", encoding="utf-8") as f:
+            json.dump(review_channels, f, ensure_ascii=False, indent=2)
+    except Exception:
+        print("[ERROR] 保存評價頻道失敗。")
+        traceback.print_exc()
+
+# ====== 關鍵字 JSON ======
 DATA_FILE = "keywords.json"
 
 def load_keywords():
@@ -26,7 +57,6 @@ def load_keywords():
             print(f"❗ 讀取 {DATA_FILE} 時發生錯誤，已備份並以空字典取代：{e}")
             try:
                 os.rename(DATA_FILE, DATA_FILE + ".bak")
-                print(f"備份檔案為 {DATA_FILE}.bak")
             except Exception as e2:
                 print(f"備份失敗：{e2}")
             return {}
@@ -44,7 +74,185 @@ def save_keywords():
     except Exception as e:
         print(f"⚠️ 儲存 {DATA_FILE} 時出錯：{e}")
 
-# ---------- 關鍵字 Modal ----------
+# ====== Bot 事件 ======
+TEST_GUILD_ID = int(os.environ.get("TEST_GUILD_ID", 0))  # 測試伺服器ID，選填
+
+@bot.event
+async def on_ready():
+    try:
+        if TEST_GUILD_ID:
+            guild = discord.Object(id=TEST_GUILD_ID)
+            await bot.tree.sync(guild=guild)
+            print(f"[INFO] 已登入 {bot.user}，指令同步到測試伺服器 {TEST_GUILD_ID}")
+        else:
+            await bot.tree.sync()
+            print(f"[INFO] 已登入 {bot.user}，全域指令同步完成")
+        await bot.change_presence(activity=discord.Game(name="管理中"))
+    except Exception:
+        traceback.print_exc()
+
+# ====== 評價系統 ======
+class ReviewModal(discord.ui.Modal, title="提交評價"):
+    def __init__(self, target_user: discord.User, messages_to_delete: list):
+        super().__init__()
+        self.target_user = target_user
+        self.messages_to_delete = messages_to_delete
+
+        self.product = discord.ui.TextInput(
+            label="購買商品名稱",
+            style=discord.TextStyle.short,
+            placeholder="請輸入商品名稱",
+            max_length=50
+        )
+        self.rating = discord.ui.TextInput(
+            label="評分（1-5）",
+            style=discord.TextStyle.short,
+            placeholder="請輸入 1 到 5",
+            max_length=1
+        )
+        self.feedback = discord.ui.TextInput(
+            label="評語",
+            style=discord.TextStyle.paragraph,
+            placeholder="寫點評語吧...",
+            max_length=50
+        )
+
+        self.add_item(self.product)
+        self.add_item(self.rating)
+        self.add_item(self.feedback)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ 你不是評價對象，無法提交。", ephemeral=True)
+            return
+
+        try:
+            guild_id = str(interaction.guild.id)
+            channel_id = review_channels.get(guild_id)
+            if not channel_id:
+                await interaction.response.send_message("❌ 尚未設定評價頻道。", ephemeral=True)
+                return
+
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                await interaction.response.send_message("❌ 找不到評價頻道。", ephemeral=True)
+                return
+
+            try:
+                rating_val = int(self.rating.value.strip())
+            except ValueError:
+                await interaction.response.send_message("❌ 評分格式錯誤，請輸入 1 到 5 的整數。", ephemeral=True)
+                return
+
+            if rating_val < 1 or rating_val > 5:
+                await interaction.response.send_message("❌ 評分需為 1 到 5。", ephemeral=True)
+                return
+
+            star_emoji = "⭐"
+            empty_star_emoji = "☆"
+            stars = star_emoji * rating_val + empty_star_emoji * (5 - rating_val)
+
+            now = datetime.datetime.now(timezone(timedelta(hours=8)))
+            time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            embed = discord.Embed(
+                title=f"📝 新的商品評價 - {self.product.value}",
+                description=f"來自：{interaction.user.mention}",
+                color=discord.Color.blurple(),
+                timestamp=now
+            )
+            embed.add_field(name="商品", value=self.product.value, inline=False)
+            embed.add_field(name="評分", value=f"{stars} (`{rating_val}/5`)", inline=False)
+            embed.add_field(name="評價內容", value=self.feedback.value or "（使用者未留下內容）", inline=False)
+            embed.add_field(name="時間", value=time_str, inline=False)
+            embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+            embed.set_footer(text="感謝您的回饋！")
+
+            await channel.send(embed=embed)
+            await interaction.response.send_message(f"✅ 你的評價已提交到 {channel.mention}", ephemeral=True)
+
+            for msg in self.messages_to_delete:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+
+            await interaction.channel.send("## 💕感謝您的評價！您的回饋對我們非常重要～ 歡迎再次回來逛逛！")
+
+        except Exception:
+            traceback.print_exc()
+            await interaction.response.send_message("❌ 評價提交失敗，請稍後再試。", ephemeral=True)
+
+class ReviewButton(discord.ui.View):
+    def __init__(self, target_user: discord.User, messages_to_delete: list):
+        super().__init__(timeout=None)
+        self.target_user = target_user
+        self.messages_to_delete = messages_to_delete
+
+    @discord.ui.button(label="填寫評價", style=discord.ButtonStyle.success)
+    async def leave_review(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ 你不是評價對象，無法填寫。", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReviewModal(self.target_user, self.messages_to_delete))
+
+@bot.tree.command(name="setreviewchannel", description="設定評價發送頻道（管理員限定）")
+@app_commands.checks.has_permissions(administrator=True)
+async def setreviewchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    try:
+        await interaction.response.defer(thinking=True)
+        save_review_channel(interaction.guild.id, channel.id)
+        embed = discord.Embed(
+            title="✅ 設定成功",
+            description=f"已設定評價頻道為 {channel.mention}",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(timezone(timedelta(hours=8)))
+        )
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        embed.set_footer(text="請確保機器人有頻道發言權限")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception:
+        traceback.print_exc()
+        await interaction.followup.send("❌ 設定頻道失敗，請稍後再試。", ephemeral=True)
+
+@bot.tree.command(name="reviews", description="叫出評價介面（選擇一個人來填寫）")
+@app_commands.describe(user="選擇要被評價的使用者")
+async def reviews(interaction: discord.Interaction, user: discord.User):
+    try:
+        await interaction.response.defer()
+        messages_to_delete = []
+        msg1 = await interaction.channel.send(f"{user.mention} 麻煩幫我點擊下方按鈕來填寫評價~")
+        messages_to_delete.append(msg1)
+        view = discord.ui.View(timeout=180)
+        button = discord.ui.Button(label="填寫評價", style=discord.ButtonStyle.success)
+
+        async def button_callback(btn_interaction: discord.Interaction):
+            if btn_interaction.user.id != user.id:
+                await btn_interaction.response.send_message("❌ 你不是評價對象，無法填寫。", ephemeral=True)
+                return
+            await btn_interaction.response.send_modal(ReviewModal(user, messages_to_delete))
+
+        button.callback = button_callback
+        view.add_item(button)
+
+        embed = discord.Embed(
+            title="📝 評價系統",
+            description=f"只有 {user.mention} 可以點擊下方按鈕來填寫評價。",
+            color=discord.Color.purple(),
+            timestamp=datetime.datetime.now(timezone(timedelta(hours=8)))
+        )
+        msg2 = await interaction.channel.send(embed=embed, view=view)
+        messages_to_delete.append(msg2)
+
+        await interaction.followup.send("✅ 已送出評價介面。", ephemeral=True)
+    except Exception:
+        traceback.print_exc()
+        try:
+            await interaction.followup.send("❌ 無法顯示評價介面。", ephemeral=True)
+        except:
+            pass
+
+# ====== 關鍵字系統 ======
 class KeywordModal(ui.Modal, title="新增或修改關鍵字"):
     def __init__(self, key_to_edit=None):
         super().__init__()
@@ -86,19 +294,6 @@ class KeywordModal(ui.Modal, title="新增或修改關鍵字"):
             f"✅ 已儲存關鍵字 `{key}` 對應回覆 `{reply}`", ephemeral=True
         )
 
-# ---------- 關鍵字按鈕面板 ----------
-class KeywordView(ui.View):
-    def __init__(self, guild_id: str):
-        super().__init__(timeout=None)
-        self.guild_id = guild_id
-        guild_keywords = keywords.get(guild_id, {})
-        for key in guild_keywords:
-            self.add_item(DeleteOrEditButton(guild_id, key))
-
-    @ui.button(label="新增關鍵字", style=discord.ButtonStyle.primary)
-    async def add_keyword(self, interaction: Interaction, button: ui.Button):
-        await interaction.response.send_modal(KeywordModal())
-
 class DeleteOrEditButton(ui.Button):
     def __init__(self, guild_id, key):
         label = key if isinstance(key, str) and len(key) <= 80 else (str(key)[:77] + "...")
@@ -126,6 +321,18 @@ class DeleteOrEditButton(ui.Button):
         await interaction.response.send_message(
             f"管理關鍵字 `{self.key}`", view=options_view, ephemeral=True
         )
+
+class KeywordView(ui.View):
+    def __init__(self, guild_id: str):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        guild_keywords = keywords.get(guild_id, {})
+        for key in guild_keywords:
+            self.add_item(DeleteOrEditButton(guild_id, key))
+
+    @ui.button(label="新增關鍵字", style=discord.ButtonStyle.primary)
+    async def add_keyword(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.send_modal(KeywordModal())
 
 @bot.event
 async def on_interaction(interaction: Interaction):
@@ -156,7 +363,6 @@ async def on_interaction(interaction: Interaction):
         print("on_interaction 發生例外：")
         traceback.print_exc()
 
-# ---------- 關鍵字斜線指令 ----------
 @bot.tree.command(name="keywords", description="開啟關鍵字管理面板")
 async def keywords_command(interaction: Interaction):
     guild_id = str(interaction.guild_id)
@@ -167,28 +373,24 @@ async def keywords_command(interaction: Interaction):
         ephemeral=True,
     )
 
-# ---------- 偵測訊息 ----------
 @bot.event
 async def on_message(message):
     try:
         if message.author.bot or not message.guild:
             return
-
         guild_id = str(message.guild.id)
         guild_keywords = keywords.get(guild_id, {})
-
         for key, reply in guild_keywords.items():
             if key in message.content:
                 await message.channel.send(reply)
                 break
-
     except Exception:
         print("on_message 發生例外：")
         traceback.print_exc()
     finally:
         await bot.process_commands(message)
 
-# ---------- 訂單 Modal ----------
+# ====== 訂單系統 ======
 class OrderModal(discord.ui.Modal, title="🛒 填寫表單"):
     product = discord.ui.TextInput(label="所需商品", placeholder="例如：1000R")
     account = discord.ui.TextInput(label="帳號", placeholder="輸入帳號")
@@ -220,14 +422,12 @@ class OrderModal(discord.ui.Modal, title="🛒 填寫表單"):
         await self.target_channel.send(embed=embed)
         await interaction.response.send_message("✅ 表單已提交！", ephemeral=True)
 
-        # ===== 刪除整個訂單面板訊息 =====
         try:
             if interaction.message:
                 await interaction.message.delete()
         except Exception as e:
             print(f"刪除訂單面板訊息失敗: {e}")
 
-# ---------- 訂單按鈕 ----------
 class OrderButton(discord.ui.View):
     def __init__(self, user: discord.User):
         super().__init__(timeout=None)
@@ -244,70 +444,7 @@ class OrderButton(discord.ui.View):
         except Exception as e:
             await interaction.response.send_message(f"⚠️ 無法開啟表單，請稍後再試。\n```{e}```", ephemeral=True)
 
-# ---------- 訂單斜線指令 ----------
 @bot.tree.command(name="開啟訂單", description="建立一個填寫訂單的表單介面")
 @app_commands.describe(user="選擇可以填寫此訂單的用戶")
 async def open_order(interaction: discord.Interaction, user: discord.User):
-    embed = discord.Embed(
-        title="🛒 訂單填寫表單",
-        description=f"{user.mention} 麻煩點選下面的按鈕填寫所需商品、帳號、密碼、備用碼。送出後請提供最近遊玩的20款遊戲，感謝配合！",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed, view=OrderButton(user))
-
-# ---------- 上線事件 ----------
-@bot.event
-async def on_ready():
-    try:
-        print(f"✅ {bot.user} 已上線")
-        await bot.change_presence(activity=discord.Game(name="關鍵字監聽中"))
-        try:
-            synced = await bot.tree.sync()
-            print(f"✅ 已同步 {len(synced)} 個斜線指令")
-        except Exception as e:
-            print(f"❌ 同步斜線指令時出錯：{e}")
-    except Exception:
-        print("on_ready 發生例外：")
-        traceback.print_exc()
-
-# ---------- Flask Web 伺服器 ----------
-app = Flask(__name__)
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
-
-# ---------- 自動 Ping 自己 ----------
-def ping_self():
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not url:
-        print("⚠️ RENDER_EXTERNAL_URL 未設，ping_self 不啟動")
-        return
-    print(f"🔁 ping_self 啟動，目標：{url}")
-    while True:
-        try:
-            r = requests.get(url, timeout=10)
-            print(f"🟢 Ping {url} -> {r.status_code}")
-        except Exception as e:
-            print(f"🔴 Ping 失敗: {e}")
-        time.sleep(300)
-
-# ---------- 啟動多執行緒 ----------
-threading.Thread(target=run_flask, daemon=True).start()
-threading.Thread(target=ping_self, daemon=True).start()
-
-# ---------- 啟動 Bot ----------
-TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
-if not TOKEN:
-    print("❌ 未設定 DISCORD_TOKEN 環境變數")
-    raise SystemExit(1)
-
-try:
-    bot.run(TOKEN)
-except Exception:
-    print("❌ bot.run 發生錯誤：")
-    traceback.print_exc()
-    raise
+    embed = discord.Embed
