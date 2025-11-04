@@ -543,7 +543,11 @@ async def open_order(interaction: discord.Interaction, user: discord.User):
         ),
         color=discord.Color.green()
     )
-    await interaction.response.send_message(embed=embed, view=OrderButton(user))
+
+     # 這裡設定 allowed_mentions 讓真正提及到使用者
+    allowed_mentions = AllowedMentions(users=True)
+    
+      await interaction.response.send_message(embed=embed, view=OrderButton(user), allowed_mentions=allowed_mentions)
 
 # ====== 啟動 ======
 if __name__ == "__main__":
