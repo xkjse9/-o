@@ -220,14 +220,12 @@ class OrderModal(discord.ui.Modal, title="🛒 填寫表單"):
         await self.target_channel.send(embed=embed)
         await interaction.response.send_message("✅ 表單已提交！", ephemeral=True)
 
-        # 刪除填寫訂單按鈕
+        # ===== 刪除整個訂單面板訊息 =====
         try:
-            view = interaction.message.view
-            if view:
-                view.clear_items()
-                await interaction.message.edit(view=view)
+            if interaction.message:
+                await interaction.message.delete()
         except Exception as e:
-            print(f"刪除按鈕失敗: {e}")
+            print(f"刪除訂單面板訊息失敗: {e}")
 
 # ---------- 訂單按鈕 ----------
 class OrderButton(discord.ui.View):
