@@ -200,140 +200,257 @@ async def reviews(interaction: Interaction, user: discord.User):
     messages_to_delete.append(msg2)
     await interaction.response.send_message("✅ 已送出評價介面。", ephemeral=True)
 
-# ====== 關鍵字系統 ======
+# ---------- 關鍵字 Modal ----------
 class KeywordModal(ui.Modal, title="新增或修改關鍵字"):
     def __init__(self, key_to_edit=None):
         super().__init__()
         self.key_to_edit = key_to_edit
-        self.keyword_input = ui.TextInput(label="關鍵字", placeholder="輸入關鍵字...", default=key_to_edit or "")
-        self.reply_input = ui.TextInput(label="回覆內容", style=discord.TextStyle.paragraph, placeholder="輸入回覆訊息...")
+
+        self.keyword_input = ui.TextInput(
+            label="要偵測的關鍵字或關鍵詞",
+            placeholder="輸入關鍵字...",
+            max_length=1000,
+            default=key_to_edit if key_to_edit else "",
+        )
         self.add_item(self.keyword_input)
+
+        self.reply_input = ui.TextInput(
+            label="回覆內容",
+            placeholder="輸入回覆訊息...",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+        )
         self.add_item(self.reply_input)
 
     async def on_submit(self, interaction: Interaction):
         guild_id = str(interaction.guild_id)
         if guild_id not in keywords:
             keywords[guild_id] = {}
+
         key = self.keyword_input.value.strip()
         reply = self.reply_input.value.strip()
+
         if not key or not reply:
-            await interaction.response.send_message("❌ 關鍵字或回覆不能為空", ephemeral=True)
+            await interaction.response.send_message(
+                "關鍵字或回覆不能為空", ephemeral=True
+            )
             return
+
+        # 如果是編輯關鍵字，先刪除舊的
         if self.key_to_edit and self.key_to_edit != key:
             keywords[guild_id].pop(self.key_to_edit, None)
+
         keywords[guild_id][key] = reply
         save_keywords()
-        await interaction.response.send_message(f"✅ 已儲存關鍵字 `{key}` 對應回覆 `{reply}`", ephemeral=True)
 
+        await interaction.response.send_message(
+            f"✅ 已儲存關鍵字 {key} 對應回覆 {reply}", ephemeral=True
+        )
+
+
+# ---------- 關鍵字按鈕面板 ----------
 class DeleteOrEditButton(ui.Button):
     def __init__(self, guild_id, key):
-        label = key if len(str(key)) <= 80 else str(key)[:77] + "..."
+        label = key if isinstance(key, str) and len(key) <= 80 else str(key)[:77] + "..."
         super().__init__(label=label, style=discord.ButtonStyle.secondary)
         self.guild_id = guild_id
         self.key = key
+        self.custom_id = f"keyword_button_{guild_id}_{key}"
 
     async def callback(self, interaction: Interaction):
-        view = ui.View(timeout=None)
-        view.add_item(ui.Button(label="修改", style=discord.ButtonStyle.success, custom_id=f"edit_{self.guild_id}_{self.key}"))
-        view.add_item(ui.Button(label="刪除", style=discord.ButtonStyle.danger, custom_id=f"delete_{self.guild_id}_{self.key}"))
-        await interaction.response.send_message(f"管理關鍵字 `{self.key}`", view=view, ephemeral=True)
+        options_view = ui.View(timeout=None)
+        options_view.add_item(
+            ui.Button(
+                label="修改",
+                style=discord.ButtonStyle.success,
+                custom_id=f"edit_{self.guild_id}_{self.key}",
+            )
+        )
+        options_view.add_item(
+            ui.Button(
+                label="刪除",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"delete_{self.guild_id}_{self.key}",
+            )
+        )
+        await interaction.response.send_message(
+            f"管理關鍵字 {self.key}", view=options_view, ephemeral=True
+        )
+
 
 class KeywordView(ui.View):
     def __init__(self, guild_id: str):
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        for key in keywords.get(guild_id, {}):
+
+        guild_keywords = keywords.get(guild_id, {})
+        for key in guild_keywords:
             self.add_item(DeleteOrEditButton(guild_id, key))
 
     @ui.button(label="新增關鍵字", style=discord.ButtonStyle.primary)
     async def add_keyword(self, interaction: Interaction, button: ui.Button):
         await interaction.response.send_modal(KeywordModal())
 
+
+# ---------- 處理按鈕互動 ----------
 @bot.event
 async def on_interaction(interaction: Interaction):
     try:
         if interaction.type != discord.InteractionType.component:
             return
-        custom_id = interaction.data.get("custom_id", "")
+
+        data = getattr(interaction, "data", None)
+        if not data:
+            return
+
+        custom_id = data.get("custom_id", "")
+        if not custom_id:
+            return
+
         if custom_id.startswith("edit_"):
             _, guild_id, key = custom_id.split("_", 2)
             await interaction.response.send_modal(KeywordModal(key_to_edit=key))
+
         elif custom_id.startswith("delete_"):
             _, guild_id, key = custom_id.split("_", 2)
             if guild_id in keywords:
                 keywords[guild_id].pop(key, None)
                 save_keywords()
-            await interaction.response.send_message(f"🗑️ 已刪除關鍵字 `{key}`", ephemeral=True)
+            await interaction.response.send_message(
+                f"🗑️ 已刪除關鍵字 {key}", ephemeral=True
+            )
+
     except Exception:
+        print("on_interaction 發生例外：")
         traceback.print_exc()
 
+
+# ---------- 關鍵字斜線指令 ----------
 @bot.tree.command(name="keywords", description="開啟關鍵字管理面板")
 async def keywords_command(interaction: Interaction):
     guild_id = str(interaction.guild_id)
     view = KeywordView(guild_id)
-    await interaction.response.send_message(f"🔧 關鍵字管理面板（伺服器：{interaction.guild.name}）", view=view, ephemeral=True)
+    await interaction.response.send_message(
+        f"🔧 關鍵字管理面板（伺服器：{interaction.guild.name}）",
+        view=view,
+        ephemeral=True,
+    )
 
+
+# ---------- 偵測訊息 ----------
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
-        return
-    guild_id = str(message.guild.id)
-    for key, reply in keywords.get(guild_id, {}).items():
-        if key in message.content:
-            await message.channel.send(reply)
-            break
-    await bot.process_commands(message)
+    try:
+        if message.author.bot or not message.guild:
+            return
 
-# ====== 訂單系統 ======
-class OrderModal(ui.Modal, title="🛒 填寫表單"):
-    product = ui.TextInput(label="所需商品")
-    account = ui.TextInput(label="帳號")
-    password = ui.TextInput(label="密碼", style=discord.TextStyle.short)
-    backup_codes = ui.TextInput(label="備用碼(逗號分隔)", style=discord.TextStyle.paragraph)
+        guild_id = str(message.guild.id)
+        guild_keywords = keywords.get(guild_id, {})
+
+        for key, reply in guild_keywords.items():
+            if key in message.content:
+                await message.channel.send(reply)
+                break
+
+    except Exception:
+        print("on_message 發生例外：")
+        traceback.print_exc()
+    finally:
+        await bot.process_commands(message)
+# ---------- 訂單 Modal ----------
+class OrderModal(discord.ui.Modal, title="🛒 填寫表單"):
+    product = discord.ui.TextInput(
+        label="所需商品",
+        placeholder="例如：1000R"
+    )
+    account = discord.ui.TextInput(
+        label="帳號",
+        placeholder="輸入帳號"
+    )
+    password = discord.ui.TextInput(
+        label="密碼",
+        style=discord.TextStyle.short,
+        placeholder="輸入密碼"
+    )
+    backup_codes = discord.ui.TextInput(
+        label="五組備用碼 請以逗號分開",
+        style=discord.TextStyle.paragraph,
+        placeholder="例如：1234,5678,9012,3456,7890"
+    )
 
     def __init__(self, user: discord.User, channel: discord.TextChannel):
         super().__init__()
         self.target_user = user
         self.target_channel = channel
-        self.add_item(self.product)
-        self.add_item(self.account)
-        self.add_item(self.password)
-        self.add_item(self.backup_codes)
 
-    async def on_submit(self, interaction: Interaction):
+    async def on_submit(self, interaction: discord.Interaction):
+        # 處理備用碼
         codes = [c.strip() for c in self.backup_codes.value.split(",") if c.strip()]
         formatted_codes = "\n".join([f"🔹 {c}" for c in codes])
-        embed = discord.Embed(title="新訂單提交", color=discord.Color.blue())
+
+        # 建立嵌入訊息
+        embed = discord.Embed(
+            title="新訂單提交",
+            color=discord.Color.blue()
+        )
         embed.add_field(name="所需商品", value=self.product.value, inline=False)
         embed.add_field(name="帳號", value=self.account.value, inline=False)
         embed.add_field(name="密碼", value=self.password.value, inline=False)
         embed.add_field(name="備用碼", value=formatted_codes or "無", inline=False)
+
+        # 發送到指定頻道
         await self.target_channel.send(embed=embed)
+
+        # 回覆用戶
         await interaction.response.send_message("✅ 表單已提交！", ephemeral=True)
+
+        # 嘗試刪除訂單面板訊息
         try:
             if interaction.message:
                 await interaction.message.delete()
-        except:
-            pass
+        except Exception as e:
+            print(f"刪除訂單面板訊息失敗: {e}")
 
-class OrderButton(ui.View):
+
+# ---------- 訂單按鈕 ----------
+class OrderButton(discord.ui.View):
     def __init__(self, user: discord.User):
         super().__init__(timeout=None)
         self.user = user
 
-    @ui.button(label="📝 填寫訂單", style=discord.ButtonStyle.primary)
-    async def fill_order(self, interaction: Interaction, button: ui.Button):
+    @discord.ui.button(label="📝 填寫訂單", style=discord.ButtonStyle.primary)
+    async def fill_order(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user.id:
-            await interaction.response.send_message("❌ 這不是給你的表單喔！", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ 這不是給你的表單喔！", ephemeral=True
+            )
             return
-        await interaction.response.send_modal(OrderModal(user=self.user, channel=interaction.channel))
 
-@bot.tree.command(name="開啟訂單", description="建立一個填寫訂單的表單介面")
+        try:
+            modal = OrderModal(user=self.user, channel=interaction.channel)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"⚠️ 無法開啟表單，請稍後再試。\n{e}", ephemeral=True
+            )
+
+
+# ---------- 訂單斜線指令 ----------
+@bot.tree.command(
+    name="開啟訂單",
+    description="建立一個填寫訂單的表單介面"
+)
 @app_commands.describe(user="選擇可以填寫此訂單的用戶")
-async def open_order(interaction: Interaction, user: discord.User):
-    view = OrderButton(user)
-    embed = discord.Embed(title="🛒 訂單表單", description=f"{user.mention} 請點擊下方按鈕填寫訂單", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+async def open_order(interaction: discord.Interaction, user: discord.User):
+    embed = discord.Embed(
+        title="🛒 訂單填寫表單",
+        description=(
+            f"{user.mention} 麻煩點選下面的按鈕填寫所需商品、帳號、密碼、備用碼。"
+            "送出後請提供最近遊玩的20款遊戲，感謝配合！"
+        ),
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, view=OrderButton(user))
 
 # ====== 啟動 ======
 if __name__ == "__main__":
