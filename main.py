@@ -164,7 +164,7 @@ class ReviewModal(discord.ui.Modal, title="提交評價"):
 
             # 建立嵌入訊息
             embed = discord.Embed(
-                title=f"📝 新的商品評價 - {self.product.value}",
+                title=f"📝 商品評價 - {self.product.value}",
                 description=f"來自：{interaction.user.mention}",
                 color=discord.Color.blurple(),
                 timestamp=now
@@ -172,7 +172,6 @@ class ReviewModal(discord.ui.Modal, title="提交評價"):
             embed.add_field(name="商品", value=self.product.value, inline=False)
             embed.add_field(name="評分", value=f"{stars} ({rating_val}/5)", inline=False)
             embed.add_field(name="評價內容", value=self.feedback.value or "（使用者未留下內容）", inline=False)
-            embed.add_field(name="時間", value=time_str, inline=False)
             embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
             embed.set_footer(text="感謝您的回饋！")
 
@@ -262,7 +261,7 @@ async def reviews(interaction: discord.Interaction, user: discord.User):
         )
         messages_to_delete.append(msg1)
 
-        view = discord.ui.View(timeout=180)
+        view = discord.ui.View(timeout=None)
         button = discord.ui.Button(label="填寫評價", style=discord.ButtonStyle.success)
 
         async def button_callback(btn_interaction: discord.Interaction):
